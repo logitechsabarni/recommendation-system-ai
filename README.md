@@ -722,3 +722,5 @@ For issues, questions, or suggestions:
 **Made with ❤️ by PersonaAI Team**
 
 `Last Updated: 2024 | Version 1.0.0`
+
+The link of the app is:- https://recommendation-system-ai-mvqcleif8zjpisr3dancgf.streamlit.app/
