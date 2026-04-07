@@ -587,6 +587,64 @@ class RecommendationEngine:
         result['score'] = (result['rating'] / 10 * 100).round(2)
         return result[['item_id', 'title', 'category', 'genre', 'rating', 'score']]
 
+    # Time-of-day → preference mapping
+    TIME_CONTEXT = {
+        "morning":   {"boost_cats": ["Comedy", "Action"],           "label": "☀️ Morning",  "tip": "Energising picks to start your day"},
+        "afternoon": {"boost_cats": ["Sci-Fi", "Action", "Thriller"],"label": "🌤️ Afternoon","tip": "Peak focus — great for complex stories"},
+        "evening":   {"boost_cats": ["Drama", "Thriller"],          "label": "🌆 Evening",  "tip": "Wind-down with engaging dramas"},
+        "night":     {"boost_cats": ["Drama", "Comedy"],            "label": "🌙 Night",    "tip": "Chill picks for late-night viewing"},
+    }
+
+    @staticmethod
+    def get_time_of_day() -> str:
+        hour = datetime.now().hour
+        if 5 <= hour < 12:
+            return "morning"
+        elif 12 <= hour < 17:
+            return "afternoon"
+        elif 17 <= hour < 21:
+            return "evening"
+        else:
+            return "night"
+
+    def context_aware_recommendation(self, user_id: int, n_recommendations: int = 8) -> pd.DataFrame:
+        """Hybrid recs boosted by time-of-day context"""
+        tod = self.get_time_of_day()
+        boost_cats = self.TIME_CONTEXT[tod]["boost_cats"]
+        base = self.hybrid_recommendation(user_id, n_recommendations * 3)
+
+        boosted = base[base['category'].isin(boost_cats)]
+        rest = base[~base['category'].isin(boost_cats)]
+        result = pd.concat([boosted, rest]).head(n_recommendations)
+        return result.reset_index(drop=True)
+
+    def get_weekly_summary(self, user_id: int) -> Dict:
+        """Stats summary for the past 7 days"""
+        cutoff = datetime.now() - timedelta(days=7)
+        week_ints = self.interactions_df[
+            (self.interactions_df['user_id'] == user_id) &
+            (self.interactions_df['timestamp'] >= cutoff)
+        ]
+        total_ints = self.interactions_df[self.interactions_df['user_id'] == user_id]
+
+        if len(week_ints) == 0:
+            top_cat = "—"
+            avg_r = 0.0
+            items_this_week = 0
+        else:
+            merged = week_ints.merge(self.items_df[['item_id','category']], on='item_id', how='left')
+            top_cat = merged['category'].mode().iloc[0] if len(merged) > 0 else "—"
+            avg_r = week_ints['rating'].mean()
+            items_this_week = len(week_ints)
+
+        return {
+            "items_this_week": items_this_week,
+            "avg_rating_this_week": round(avg_r, 1),
+            "top_category_this_week": top_cat,
+            "total_items_ever": len(total_ints),
+            "streak_days": min(items_this_week, 7),
+        }
+
     def get_user_badges(self, user_id: int) -> List[Dict]:
         """Calculate gamification badges earned by the user"""
         badges = []
@@ -710,6 +768,12 @@ def initialize_session_state():
 
     if 'badges_seen' not in st.session_state:
         st.session_state.badges_seen = set()
+
+    if 'items_per_page' not in st.session_state:
+        st.session_state.items_per_page = 10
+
+    if 'last_recommendations' not in st.session_state:
+        st.session_state.last_recommendations = {}
 
 initialize_session_state()
 
@@ -1364,17 +1428,93 @@ def main():
     st.markdown("---")
     
     # Main navigation tabs
-    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
         "🎯 Recommendations",
         "📊 Analytics",
         "👤 User Profile",
         "🔬 Algorithm Details",
         "⚙️ Settings",
-        "💬 Chat"
+        "💬 Chat",
+        "❤️ Favourites"
     ])
     
     engine = st.session_state.engine
     analyzer = PersonalizationAnalyzer(engine)
+
+    # ========================================================================
+    # SIDEBAR — Live User Snapshot
+    # ========================================================================
+    with st.sidebar:
+        st.markdown("""
+        <div style="text-align:center;padding:1rem 0 0.5rem;">
+            <div style="font-size:2.5rem;">✨</div>
+            <div style="font-weight:700;font-size:1.1rem;color:#00D9FF;">PersonaAI</div>
+            <div style="color:#b0b8d4;font-size:0.75rem;">Recommendation Engine</div>
+        </div>
+        """, unsafe_allow_html=True)
+
+        st.divider()
+
+        # Time-of-day context badge
+        tod = engine.get_time_of_day()
+        tod_info = engine.TIME_CONTEXT[tod]
+        st.markdown(f"""
+        <div style="background:rgba(0,217,255,0.08);border:1px solid rgba(0,217,255,0.25);
+            border-radius:10px;padding:0.7rem 1rem;margin-bottom:0.8rem;text-align:center;">
+            <div style="font-size:1.1rem;font-weight:700;color:#00D9FF;">{tod_info['label']}</div>
+            <div style="color:#b0b8d4;font-size:0.78rem;margin-top:0.2rem;">{tod_info['tip']}</div>
+        </div>
+        """, unsafe_allow_html=True)
+
+        # Current user quick stats
+        uid = st.session_state.selected_user
+        profile = analyzer.get_user_profile(uid)
+        weekly = engine.get_weekly_summary(uid)
+        badges = engine.get_user_badges(uid)
+
+        if profile:
+            st.markdown(f"""
+            <div style="background:linear-gradient(135deg,#1a1f3a,#2a1f4a);border:1px solid rgba(131,56,236,0.3);
+                border-radius:12px;padding:1rem;margin-bottom:0.8rem;">
+                <div style="font-weight:700;color:#b97bff;margin-bottom:0.6rem;">👤 User {uid}</div>
+                <div style="color:#b0b8d4;font-size:0.82rem;line-height:1.9;">
+                    📂 <b>{profile.get('items_reviewed', 0)}</b> items reviewed<br>
+                    ⭐ Avg rating: <b>{profile.get('avg_rating', 0):.1f}</b><br>
+                    🎯 Fav: <b>{profile.get('favorite_category','—')}</b><br>
+                    🏆 <b>{len(badges)}</b> badge{'s' if len(badges) != 1 else ''} earned
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
+
+        # Weekly summary
+        st.markdown("**📅 This Week**")
+        wc1, wc2 = st.columns(2)
+        wc1.metric("Items", weekly['items_this_week'])
+        wc2.metric("Avg ★", weekly['avg_rating_this_week'] if weekly['avg_rating_this_week'] > 0 else "—")
+        if weekly['streak_days'] > 0:
+            st.caption(f"🔥 {weekly['streak_days']}-day activity streak  ·  Top: **{weekly['top_category_this_week']}**")
+
+        st.divider()
+
+        # Favourites count
+        fav_count = len(st.session_state.favorites)
+        fb_count = len(st.session_state.feedback)
+        st.markdown(f"""
+        <div style="color:#b0b8d4;font-size:0.82rem;line-height:2;">
+            ❤️ <b>{fav_count}</b> saved favourite{'s' if fav_count != 1 else ''}<br>
+            👍 <b>{fb_count}</b> item{'s' if fb_count != 1 else ''} rated<br>
+            💬 <b>{len(st.session_state.chat_history) // 2}</b> chat exchange{'s' if len(st.session_state.chat_history) // 2 != 1 else ''}
+        </div>
+        """, unsafe_allow_html=True)
+
+        st.divider()
+
+        # Quick context-aware button
+        if st.button("⚡ Context Recs (Now)", use_container_width=True,
+                     help=f"Recommendations tuned for {tod_info['label']}"):
+            st.session_state.show_context_recs = True
+            st.session_state.show_recs = False
+            st.session_state.show_discover = False
     
     # ========================================================================
     # TAB 1: RECOMMENDATIONS
@@ -1461,14 +1601,32 @@ def main():
                 if st.button("🚀 Generate", use_container_width=True):
                     st.session_state.show_recs = True
                     st.session_state.show_discover = False
+                    st.session_state.show_context_recs = False
             with disc_col:
                 if st.button("🎲 Discover New", use_container_width=True, help="Step outside your comfort zone"):
                     st.session_state.show_discover = True
                     st.session_state.show_recs = False
+                    st.session_state.show_context_recs = False
 
         with col2:
+            # --- CONTEXT-AWARE path (triggered from sidebar) ---
+            if st.session_state.get('show_context_recs', False):
+                tod = engine.get_time_of_day()
+                tod_info = engine.TIME_CONTEXT[tod]
+                st.markdown(f"""
+                <div style="background:linear-gradient(135deg,rgba(0,217,255,0.08),rgba(131,56,236,0.08));
+                    border:1px solid rgba(0,217,255,0.3);border-radius:14px;padding:1rem 1.5rem;margin-bottom:1rem;">
+                    <b style="color:#00D9FF;">{tod_info['label']} — Context-Aware Picks</b>
+                    <p style="color:#b0b8d4;font-size:0.9rem;margin:0.3rem 0 0;">{tod_info['tip']}</p>
+                </div>
+                """, unsafe_allow_html=True)
+                ctx_recs = engine.context_aware_recommendation(selected_user, n_recs)
+                render_recommendation_cards(ctx_recs, f"Context ({tod_info['label']})")
+                # Store for export
+                st.session_state.last_recommendations[f"Context ({tod_info['label']})"] = ctx_recs
+
             # --- DISCOVER NEW path ---
-            if st.session_state.get('show_discover', False):
+            elif st.session_state.get('show_discover', False):
                 st.markdown("""
                 <div style="background:linear-gradient(135deg,rgba(6,255,165,0.08),rgba(131,56,236,0.08));
                     border:1px solid rgba(6,255,165,0.3);border-radius:14px;padding:1rem 1.5rem;margin-bottom:1rem;">
@@ -1480,6 +1638,7 @@ def main():
                 """, unsafe_allow_html=True)
                 discover_recs = engine.discover_new(selected_user, n_recs)
                 render_recommendation_cards(discover_recs, "Discover New")
+                st.session_state.last_recommendations["Discover New"] = discover_recs
 
             # --- MOOD path ---
             elif st.session_state.selected_mood and st.session_state.get('show_recs', False):
@@ -1495,6 +1654,7 @@ def main():
                 """, unsafe_allow_html=True)
                 mood_recs = engine.mood_based_recommendation(selected_user, mood, n_recs)
                 render_recommendation_cards(mood_recs, f"Mood: {mood}")
+                st.session_state.last_recommendations[f"Mood: {mood}"] = mood_recs
 
             # --- NORMAL path ---
             elif st.session_state.get('show_recs', False):
@@ -1516,6 +1676,9 @@ def main():
                             )
                         elif algo == "Trending":
                             recommendations_dict[algo] = engine.trending_items(n_recs)
+
+                # Store for export
+                st.session_state.last_recommendations = recommendations_dict
 
                 for algo, recs in recommendations_dict.items():
                     render_recommendation_cards(recs, algo)
